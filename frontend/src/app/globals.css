@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #14171c;
+  --paper: #faf8f3;
+  --paper-line: #e7e2d6;
+  --mark-add: #2f6f4e;
+  --mark-add-bg: #e5f0e9;
+  --mark-remove: #a63b32;
+  --mark-remove-bg: #f6e6e3;
+  --mark-replace: #b9791f;
+  --mark-replace-bg: #f5ecda;
+  --muted: #6b6558;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-paper: var(--paper);
+  --color-paper-line: var(--paper-line);
+  --color-mark-add: var(--mark-add);
+  --color-mark-add-bg: var(--mark-add-bg);
+  --color-mark-remove: var(--mark-remove);
+  --color-mark-remove-bg: var(--mark-remove-bg);
+  --color-mark-replace: var(--mark-replace);
+  --color-mark-replace-bg: var(--mark-replace-bg);
+  --color-muted: var(--muted);
+  --font-serif: "Source Serif 4", ui-serif, Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}

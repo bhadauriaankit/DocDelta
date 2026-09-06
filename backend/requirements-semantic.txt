@@ -1,0 +1,31 @@
+# OPTIONAL — NOT installed by default, and NOT referenced in the
+# Dockerfile. Installing this upgrades Phase 7's semantic comparison from
+# TF-IDF (lexical/word-overlap similarity, the default — see
+# app/embeddings.py) to real sentence embeddings, which can recognize a
+# paraphrase as similar even when it shares almost no words with the
+# original.
+#
+# IMPORTANT — install PyTorch's CPU-only build FIRST. A plain
+# `pip install sentence-transformers` pulls in the full CUDA/GPU build of
+# PyTorch by default, which downloads several GB of nvidia-* packages
+# that are entirely useless on a machine with no GPU (confirmed while
+# building this phase — it happened by accident and nearly filled a
+# disk). The CPU-only wheel is a small fraction of that size.
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-semantic.txt
+#
+# Then set SEMANTIC_PROVIDER=sentence-transformers (see app/config.py)
+# as an environment variable for both the backend and worker services,
+# and restart them. The first comparison after that will download the
+# model (~90MB, from Hugging Face) and cache it inside the container —
+# if you're running this in Docker, that download happens fresh every
+# time the container is rebuilt unless you add a volume for the model
+# cache directory (~/.cache/huggingface by default).
+#
+# If the model can't be loaded for any reason (not installed, no
+# internet for the download, corrupted cache), app/embeddings.py falls
+# back to TF-IDF automatically and logs why — comparisons keep working
+# either way.
+
+sentence-transformers==3.1.1
