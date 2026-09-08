@@ -501,3 +501,31 @@ def test_create_text_job_validation_error():
     resp = client.post("/jobs/text", json={"original_text": "Hello"})
     assert resp.status_code == 422
 
+
+def test_semantic_diff_response_includes_segments_in_matches():
+    payload = {
+        "original_text": "Paragraph one is identical.\n\nParagraph two has thirty days.",
+        "modified_text": "Paragraph one is identical.\n\nParagraph two has fifteen days.",
+    }
+    resp = client.post("/jobs/text", json=payload)
+    assert resp.status_code == 202
+
+    final = _wait_for_job(resp.json()["id"])
+    assert final["status"] == "done"
+    assert final["semantic_diff"] is not None
+    matches = final["semantic_diff"]["matches"]
+    assert len(matches) == 2
+
+    # Exact match has equal segments
+    exact_match = next(m for m in matches if m["type"] == "exact_match")
+    assert len(exact_match["segments"]) >= 1
+    assert all(s["type"] == "equal" for s in exact_match["segments"])
+
+    # Changed match has word-level diff segments
+    changed_match = next(m for m in matches if m["type"] != "exact_match")
+    assert len(changed_match["segments"]) >= 1
+    seg_types = [s["type"] for s in changed_match["segments"]]
+    assert "equal" in seg_types
+    assert "replaced" in seg_types
+
+

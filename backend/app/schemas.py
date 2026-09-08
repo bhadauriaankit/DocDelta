@@ -86,6 +86,7 @@ class ParagraphMatchResponse(BaseModel):
     modified: str | None = None
     similarity: float | None = None
     confidence: str | None = None
+    segments: list[DiffSegmentResponse] = []
 
 
 class SemanticDiffResponse(BaseModel):

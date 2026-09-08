@@ -101,3 +101,100 @@ def test_one_sided_empty_document_produces_only_additions():
     result = compare_semantic("", "New content that didn't exist before.")
     assert result.stats["added"] == 1
     assert result.stats["exact_match"] == 0
+
+
+def test_paragraph_match_includes_word_level_segments():
+    original = (
+        "Clause 1: The agreement is effective immediately.\n\n"
+        "Clause 2: Payment is due within 30 days."
+    )
+    modified = (
+        "Clause 1: The agreement is effective immediately.\n\n"
+        "Clause 2: Payment is due within 15 days.\n\n"
+        "Clause 3: Brand new added section."
+    )
+
+    result = compare_semantic(original, modified)
+
+    # 1 exact match (Clause 1), 1 wording change (Clause 2), 1 added (Clause 3)
+    exact_matches = [m for m in result.matches if m.type == "exact_match"]
+    assert len(exact_matches) == 1
+    assert len(exact_matches[0].segments) >= 1
+    assert all(s.type == "equal" for s in exact_matches[0].segments)
+
+    changed_matches = [m for m in result.matches if m.type in ("minor_wording_change", "semantically_similar", "meaningful_change", "major_change")]
+    assert len(changed_matches) == 1
+    c2 = changed_matches[0]
+    assert "Payment is due" in (c2.original or "")
+    changed_types = [s.type for s in c2.segments]
+    assert "equal" in changed_types
+    assert "replaced" in changed_types
+
+    added_matches = [m for m in result.matches if m.type == "added"]
+    assert len(added_matches) == 1
+    assert all(s.type == "added" for s in added_matches[0].segments)
+
+    # Test removed paragraph
+    res_removed = compare_semantic(
+        "Clause 1: Same.\n\nClause 2: Removed paragraph.",
+        "Clause 1: Same."
+    )
+    removed_matches = [m for m in res_removed.matches if m.type == "removed"]
+    assert len(removed_matches) == 1
+    assert all(s.type == "removed" for s in removed_matches[0].segments)
+
+
+def test_matches_preserve_document_order():
+    """Confirms that reworded or added paragraphs are not lumped at the end,
+    but follow the natural document flow."""
+    original = (
+        "Clause 1: First clause text.\n\n"
+        "Clause 2: Second clause with 30 days deadline.\n\n"
+        "Clause 3: Third clause text."
+    )
+    modified = (
+        "Clause 1: First clause text.\n\n"
+        "Clause 2: Second clause with 14 days deadline.\n\n"
+        "Clause 3: Third clause text."
+    )
+
+    result = compare_semantic(original, modified)
+    assert len(result.matches) == 3
+    assert result.matches[0].type == "exact_match"
+    assert "Clause 1" in (result.matches[0].original or "")
+
+    assert result.matches[1].type != "exact_match"
+    assert "Clause 2" in (result.matches[1].original or "")
+
+    assert result.matches[2].type == "exact_match"
+    assert "Clause 3" in (result.matches[2].original or "")
+
+
+def test_long_document_performance_and_scaling():
+    """100+ paragraphs with mixed exact matches and wording changes to confirm
+    per-row compare_text remains fast and produces segments for each row."""
+    import time
+
+    original_paragraphs = [
+        f"Section {i}: This is standard clause boilerplate with term {i * 10}."
+        for i in range(120)
+    ]
+    modified_paragraphs = list(original_paragraphs)
+    # Modify every 5th paragraph
+    for i in range(0, 120, 5):
+        modified_paragraphs[i] = (
+            f"Section {i}: This is updated clause terms with revised duration {i * 12}."
+        )
+
+    t0 = time.perf_counter()
+    result = compare_semantic(
+        "\n\n".join(original_paragraphs),
+        "\n\n".join(modified_paragraphs),
+    )
+    elapsed = time.perf_counter() - t0
+
+    assert len(result.matches) == 120
+    assert elapsed < 2.0  # well under 2 seconds for 120 paragraphs
+    assert all(len(m.segments) > 0 for m in result.matches)
+
+

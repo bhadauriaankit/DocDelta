@@ -78,6 +78,7 @@ export type ParagraphMatch = {
   modified?: string;
   similarity?: number;
   confidence?: "high" | "low";
+  segments?: DiffSegment[];
 };
 
 export type SemanticDiff = {

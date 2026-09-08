@@ -37,7 +37,7 @@ doccompare-ai/
 │   │   └── parsers/       # format detection + text/pdf/docx/xlsx/csv/pptx/image extraction
 │   ├── requirements.txt          # default deps — no heavy ML dependencies
 │   ├── requirements-semantic.txt # OPTIONAL: real sentence-embeddings upgrade
-│   └── tests/             # pytest suite (126 tests, no external services needed)
+│   └── tests/             # pytest suite (130 tests, no external services needed)
 ├── frontend/         Next.js 15 + TypeScript + Tailwind v4
 │   └── src/
 │       ├── app/page.tsx       # main comparison page (job create + poll, file/paste toggle)
@@ -651,6 +651,52 @@ compare two snippets or paragraphs already copied to their clipboard.
     payload fields.
 - **Frontend build**: TypeScript compilation and Next.js static build
   passed with 0 errors.
+
+## Fix (September 2026): Side-by-Side View Misalignment
+
+Fixes an issue where comparing documents with structural formatting differences (e.g. DOCX vs. PDF extractions of legal contracts, or documents with inserted clauses) displayed unrelated clauses opposite each other in the side-by-side Text view.
+
+### The Problem
+
+When comparing a DOCX and PDF version of the same document, the side-by-side view showed unrelated clauses horizontally aligned on the same row. For example, the left column showed clauses `1.11`, `1.11.1`, and `1.11.2` (marked as removed) while the right column at that exact horizontal position showed clauses `1.8` and `1.9` (completely unrelated content).
+
+### Root Cause
+
+Previously, `SideBySideView.tsx` rendered both columns by iterating through the single flat `segments` array produced by the word-level `difflib.SequenceMatcher` in `diff_engine.py`. The left column rendered segments where `type != "added"`, while the right column rendered segments where `type != "removed"`.
+
+Because PDF text extractors and DOCX parsers segment whitespace, lines, and structural blocks differently (or when paragraphs are added/deleted earlier in a document), the token counts skipped on either side diverged quickly. As diff segments accumulated down the page, the left and right columns drifted vertically out of sync, displaying unrelated sections on the same row.
+
+### Solution: Paragraph-Aligned Rows with Word-Level Sub-Diffs (Option B)
+
+Rather than rendering two independent columns from a flat token stream, the side-by-side view now aligns horizontally by **paragraph matches** (`semantic_diff.matches`), computing word-level diffs specifically within each matched row:
+
+1. **Word-Level Sub-Diffs per Match (`app/semantic_diff.py` & `schemas.py`)**:
+   - `ParagraphMatch` model extended with `segments: list[DiffSegment]`.
+   - For identical paragraphs (`match_type == "exact"`), emits a single `equal` segment without redundant diff computation.
+   - For reworded or modified paragraphs (`match_type in ("reworded", "major_change")`), executes `diff_engine.compare_text(original, modified)` to compute word-level diffs bounded strictly within that paragraph pair.
+   - For single-sided changes (`match_type == "added"` or `"removed"`), emits an `added` or `removed` segment.
+2. **Document-Flow Match Ordering (`_order_matches()`)**:
+   - Matches previously clustered all exact matches at the top of the list. They are now arranged in true reading order using original document positions, with added paragraphs placed via linear interpolation relative to surrounding content.
+3. **Aligned Grid Component (`SideBySideView.tsx`)**:
+   - Renders synchronized horizontal rows (`OriginalCell` and `ModifiedCell`):
+     - **Matched / Changed rows**: Left cell shows original text, right cell shows modified text. Changed words are highlighted in-place (red strike-through on original, green highlight on modified) using `match.segments`.
+     - **Removed paragraphs**: Left cell displays deleted text; right cell shows a clear `(Removed in modified)` placeholder gap.
+     - **Added paragraphs**: Left cell shows a `(Not present in original)` placeholder gap; right cell displays added text.
+   - **Graceful Fallback**: If semantic matches are unavailable (e.g. semantic comparison disabled or not computed), automatically falls back to legacy segment-based rendering (`FallbackOriginalColumn` / `FallbackModifiedColumn`).
+   - `DiffView.tsx` (Inline View) remains unchanged, continuing to render the document-level diff sequence.
+
+### Performance & Scaling
+
+Computing word-level diffs on individual paragraph pairs scales linearly with document length ($O(N \cdot k^2)$, where $k$ is average paragraph length) and avoids the quadratic overhead of global token diffs on large documents. A synthetic test with 120 paragraphs (over 40,000 words) executes in under 0.8 seconds.
+
+### Testing & Verification
+
+- **Pytest suite expanded to 130 tests**:
+  - `test_paragraph_match_includes_word_level_segments`: verifies `segments` field population across exact, reworded, added, and removed paragraph pairs.
+  - `test_matches_preserve_document_order`: confirms matches retain linear document sequence instead of clustering exact matches.
+  - `test_long_document_performance_and_scaling`: tests 120 paragraphs for correctness and sub-second performance.
+  - `test_semantic_diff_response_includes_segments_in_matches`: verifies the API schema correctly serializes `segments` inside `semantic_diff.matches`.
+- **Frontend Build**: TypeScript type-checking and Next.js static build compile cleanly with 0 errors.
 
 ## Next up: Phase 8
 

@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from app.diff_engine import DiffSegment, compare_text
 from app.embeddings import get_embedding_provider
 
 # (min_similarity, tier_label) — checked in order, first match wins.
@@ -60,6 +61,10 @@ class ParagraphMatch:
     # aren't a similarity judgment at all, so both leave this as None
     # rather than implying a confidence level that doesn't apply.
     confidence: str | None = None
+    # Word-level diff segments scoped specifically to this paragraph pair —
+    # allows side-by-side views to render fine-grained "this word changed"
+    # highlighting within row-aligned clauses.
+    segments: list[DiffSegment] = field(default_factory=list)
 
 
 @dataclass
@@ -93,26 +98,101 @@ def _confidence(similarity: float) -> str:
     return "high" if margin > _CONFIDENCE_MARGIN else "low"
 
 
-def _match_remaining(
-    original_texts: list[str], modified_texts: list[str]
-) -> tuple[list[ParagraphMatch], dict[str, int]]:
-    stats = {label: 0 for label in _TIER_LABELS} | {"added": 0, "removed": 0}
-    matches: list[ParagraphMatch] = []
+def _compute_match_segments(
+    match_type: str, original: str | None, modified: str | None
+) -> list[DiffSegment]:
+    if match_type == "exact_match":
+        text = original if original is not None else (modified or "")
+        return [DiffSegment(type="equal", original=text, modified=text)]
+    orig = original or ""
+    mod = modified or ""
+    return compare_text(orig, mod).segments
 
-    if not original_texts or not modified_texts:
-        for text in original_texts:
-            matches.append(ParagraphMatch(type="removed", original=text))
+
+def _order_matches(
+    indexed_matches: list[tuple[int | None, int | None, ParagraphMatch]],
+) -> list[ParagraphMatch]:
+    """Orders matches to follow document flow.
+
+    Exact and reworded pairs are anchored by their original paragraph index.
+    Added paragraphs (which have no original index) are interpolated relative
+    to neighboring matched modified paragraphs, ensuring they appear at the
+    point in the document where they were inserted rather than grouped at the end.
+    """
+    if not indexed_matches:
+        return []
+
+    matched_mod_to_orig = {
+        m_idx: o_idx
+        for o_idx, m_idx, _ in indexed_matches
+        if o_idx is not None and m_idx is not None
+    }
+    sorted_matched_mods = sorted(matched_mod_to_orig.keys())
+
+    def sort_key(item: tuple[int | None, int | None, ParagraphMatch]) -> tuple[float, int, int]:
+        orig_idx, mod_idx, _ = item
+        if orig_idx is not None:
+            return (float(orig_idx), orig_idx, mod_idx if mod_idx is not None else -1)
+
+        # Added paragraph: interpolate position using neighboring matched modified paragraphs
+        assert mod_idx is not None
+        if not sorted_matched_mods:
+            return (float(mod_idx), -1, mod_idx)
+
+        prev_m = max((m for m in sorted_matched_mods if m < mod_idx), default=None)
+        next_m = min((m for m in sorted_matched_mods if m > mod_idx), default=None)
+
+        if prev_m is not None and next_m is not None:
+            prev_orig = matched_mod_to_orig[prev_m]
+            next_orig = matched_mod_to_orig[next_m]
+            fraction = (mod_idx - prev_m) / (next_m - prev_m)
+            est = prev_orig + fraction * (next_orig - prev_orig)
+        elif prev_m is not None:
+            est = matched_mod_to_orig[prev_m] + 0.5 + 0.01 * (mod_idx - prev_m)
+        elif next_m is not None:
+            est = matched_mod_to_orig[next_m] - 0.5 + 0.01 * (mod_idx - next_m)
+        else:
+            est = float(mod_idx)
+
+        return (est, -1, mod_idx)
+
+    return [m for _, _, m in sorted(indexed_matches, key=sort_key)]
+
+
+def _match_remaining(
+    unmatched_original: list[tuple[int, str]],
+    unmatched_modified: list[tuple[int, str]],
+) -> tuple[list[tuple[int | None, int | None, ParagraphMatch]], dict[str, int]]:
+    stats = {label: 0 for label in _TIER_LABELS} | {"added": 0, "removed": 0}
+    indexed_matches: list[tuple[int | None, int | None, ParagraphMatch]] = []
+
+    if not unmatched_original or not unmatched_modified:
+        for orig_idx, text in unmatched_original:
+            match = ParagraphMatch(
+                type="removed",
+                original=text,
+                segments=_compute_match_segments("removed", text, None),
+            )
+            indexed_matches.append((orig_idx, None, match))
             stats["removed"] += 1
-        for text in modified_texts:
-            matches.append(ParagraphMatch(type="added", modified=text))
+        for mod_idx, text in unmatched_modified:
+            match = ParagraphMatch(
+                type="added",
+                modified=text,
+                segments=_compute_match_segments("added", None, text),
+            )
+            indexed_matches.append((None, mod_idx, match))
             stats["added"] += 1
-        return matches, stats
+        return indexed_matches, stats
+
+    original_texts = [text for _, text in unmatched_original]
+    modified_texts = [text for _, text in unmatched_modified]
 
     provider = get_embedding_provider()
     sim_matrix = np.clip(provider.similarity_matrix(original_texts, modified_texts), 0.0, 1.0)
 
-    available_rows = set(range(len(original_texts)))
-    available_cols = set(range(len(modified_texts)))
+    available_rows = set(range(len(unmatched_original)))
+    available_cols = set(range(len(unmatched_modified)))
 
     # Take the single highest-scoring pair repeatedly, skipping any
     # row/col already claimed by an earlier (higher-scoring) pick. The
@@ -126,27 +206,42 @@ def _match_remaining(
             continue
         similarity = float(sim_matrix[row, col])
         tier = _classify(similarity)
-        matches.append(
-            ParagraphMatch(
-                type=tier,
-                original=original_texts[row],
-                modified=modified_texts[col],
-                similarity=round(similarity, 4),
-                confidence=_confidence(similarity),
-            )
+        orig_idx, orig_text = unmatched_original[row]
+        mod_idx, mod_text = unmatched_modified[col]
+        match = ParagraphMatch(
+            type=tier,
+            original=orig_text,
+            modified=mod_text,
+            similarity=round(similarity, 4),
+            confidence=_confidence(similarity),
+            segments=_compute_match_segments(tier, orig_text, mod_text),
         )
+        indexed_matches.append((orig_idx, mod_idx, match))
         stats[tier] += 1
         available_rows.discard(row)
         available_cols.discard(col)
 
     for row in available_rows:
-        matches.append(ParagraphMatch(type="removed", original=original_texts[row]))
+        orig_idx, orig_text = unmatched_original[row]
+        match = ParagraphMatch(
+            type="removed",
+            original=orig_text,
+            segments=_compute_match_segments("removed", orig_text, None),
+        )
+        indexed_matches.append((orig_idx, None, match))
         stats["removed"] += 1
+
     for col in available_cols:
-        matches.append(ParagraphMatch(type="added", modified=modified_texts[col]))
+        mod_idx, mod_text = unmatched_modified[col]
+        match = ParagraphMatch(
+            type="added",
+            modified=mod_text,
+            segments=_compute_match_segments("added", None, mod_text),
+        )
+        indexed_matches.append((None, mod_idx, match))
         stats["added"] += 1
 
-    return matches, stats
+    return indexed_matches, stats
 
 
 def compare_semantic(original_text: str, modified_text: str) -> SemanticDiff:
@@ -154,34 +249,41 @@ def compare_semantic(original_text: str, modified_text: str) -> SemanticDiff:
     modified_paragraphs = _split_paragraphs(modified_text)
 
     stats = {"exact_match": 0}
-    matches: list[ParagraphMatch] = []
+    indexed_matches: list[tuple[int | None, int | None, ParagraphMatch]] = []
 
     # Deterministic pass first (see module docstring): pull out exact
     # string matches before any similarity model gets involved at all.
     modified_pool = list(enumerate(modified_paragraphs))
     claimed_modified: set[int] = set()
-    unmatched_original: list[str] = []
+    unmatched_original: list[tuple[int, str]] = []
 
-    for original_paragraph in original_paragraphs:
+    for orig_idx, original_paragraph in enumerate(original_paragraphs):
         match_index = next(
             (i for i, text in modified_pool if i not in claimed_modified and text == original_paragraph),
             None,
         )
         if match_index is not None:
-            matches.append(
-                ParagraphMatch(type="exact_match", original=original_paragraph, modified=original_paragraph, similarity=1.0)
+            match = ParagraphMatch(
+                type="exact_match",
+                original=original_paragraph,
+                modified=original_paragraph,
+                similarity=1.0,
+                segments=_compute_match_segments("exact_match", original_paragraph, original_paragraph),
             )
+            indexed_matches.append((orig_idx, match_index, match))
             stats["exact_match"] += 1
             claimed_modified.add(match_index)
         else:
-            unmatched_original.append(original_paragraph)
+            unmatched_original.append((orig_idx, original_paragraph))
 
-    unmatched_modified = [text for i, text in modified_pool if i not in claimed_modified]
+    unmatched_modified = [(i, text) for i, text in modified_pool if i not in claimed_modified]
 
     provider_name = get_embedding_provider().name if (unmatched_original and unmatched_modified) else "n/a"
     remaining_matches, remaining_stats = _match_remaining(unmatched_original, unmatched_modified)
 
-    matches.extend(remaining_matches)
+    indexed_matches.extend(remaining_matches)
     stats.update(remaining_stats)
 
-    return SemanticDiff(provider=provider_name, matches=matches, stats=stats)
+    sorted_matches = _order_matches(indexed_matches)
+
+    return SemanticDiff(provider=provider_name, matches=sorted_matches, stats=stats)

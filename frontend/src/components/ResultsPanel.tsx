@@ -168,7 +168,10 @@ export function ResultsPanel({ result }: { result: JobStatusResponse }) {
               </button>
             </div>
             {textView === "side-by-side" ? (
-              <SideBySideView segments={result.segments} />
+              <SideBySideView
+                segments={result.segments}
+                matches={result.semantic_diff?.matches}
+              />
             ) : (
               <DiffView segments={result.segments} />
             )}
