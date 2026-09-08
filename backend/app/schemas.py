@@ -129,6 +129,14 @@ class JobCreateResponse(BaseModel):
     status: str
 
 
+class PasteCompareRequest(BaseModel):
+    """Request body for POST /jobs/text — accepts raw text strings instead
+    of multipart file uploads."""
+
+    original_text: str
+    modified_text: str
+
+
 class JobStatusResponse(BaseModel):
     """Returned by GET /jobs/{id}. The comparison-result fields are only
     populated once status == "done"; `error` is only populated once

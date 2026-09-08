@@ -147,6 +147,24 @@ export async function createComparisonJob(
   return res.json();
 }
 
+/** Starts a background comparison job from two raw text strings via
+ * POST /jobs/text. Returns the same { id, status } response as file upload. */
+export async function createComparisonJobFromText(
+  originalText: string,
+  modifiedText: string
+): Promise<{ id: string; status: JobStatus }> {
+  const res = await fetch(`${API_URL}/jobs/text`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      original_text: originalText,
+      modified_text: modifiedText,
+    }),
+  });
+  if (!res.ok) return parseErrorOrThrow(res, "Could not start comparison");
+  return res.json();
+}
+
 export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
   const res = await fetch(`${API_URL}/jobs/${jobId}`);
   if (!res.ok) return parseErrorOrThrow(res, "Could not fetch job status");

@@ -2,7 +2,13 @@
 
 import { useState } from "react";
 import type { JobStatusResponse } from "@/lib/api";
-import { buildSummary, formatSummarySentence, type TabId } from "@/lib/summary";
+import {
+  buildSummary,
+  formatSummarySentence,
+  type CompareMode,
+  type TabId,
+  TAB_MODE_MAP,
+} from "@/lib/summary";
 import { SimilarityMeter } from "@/components/SimilarityMeter";
 import { DiffView } from "@/components/DiffView";
 import { SideBySideView } from "@/components/SideBySideView";
@@ -20,9 +26,26 @@ const TAB_LABEL: Record<TabId, string> = {
 };
 
 export function ResultsPanel({ result }: { result: JobStatusResponse }) {
-  const { lines, availableTabs } = buildSummary(result);
-  const [activeTab, setActiveTab] = useState<TabId>(availableTabs[0] ?? "text");
+  const { lines, contentTabs, appearanceTabs } = buildSummary(result);
+  const [mode, setMode] = useState<CompareMode>("content");
+  const [activeTab, setActiveTab] = useState<TabId>(() => contentTabs[0] ?? "text");
   const [textView, setTextView] = useState<"side-by-side" | "inline">("side-by-side");
+
+  const visibleTabs = mode === "content" ? contentTabs : appearanceTabs;
+
+  function handleModeChange(newMode: CompareMode) {
+    setMode(newMode);
+    const targetTabs = newMode === "content" ? contentTabs : appearanceTabs;
+    if (targetTabs.length > 0 && !targetTabs.includes(activeTab)) {
+      setActiveTab(targetTabs[0]);
+    }
+  }
+
+  function handleJumpToTab(tabId: TabId) {
+    const targetMode = TAB_MODE_MAP[tabId];
+    setMode(targetMode);
+    setActiveTab(tabId);
+  }
 
   if (result.similarity === undefined) return null;
 
@@ -51,7 +74,7 @@ export function ResultsPanel({ result }: { result: JobStatusResponse }) {
             {lines.map((l) => (
               <li key={l.tabId}>
                 <button
-                  onClick={() => setActiveTab(l.tabId)}
+                  onClick={() => handleJumpToTab(l.tabId)}
                   className="text-ink underline decoration-muted decoration-dotted underline-offset-4 hover:decoration-ink"
                 >
                   {l.count} {l.count === 1 ? l.label : `${l.label}s`}
@@ -62,22 +85,64 @@ export function ResultsPanel({ result }: { result: JobStatusResponse }) {
         )}
       </div>
 
-      {availableTabs.length > 1 && (
-        <div className="flex flex-wrap gap-1 border-b border-paper-line">
-          {availableTabs.map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={[
-                "rounded-t-sm border-b-2 px-4 py-2.5 text-sm font-medium transition-colors",
-                activeTab === tab ? "border-ink text-ink" : "border-transparent text-muted hover:text-ink",
-              ].join(" ")}
-            >
-              {TAB_LABEL[tab]}
-            </button>
-          ))}
+      {/* Comparison Mode Toggle: Content vs Appearance */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="inline-flex rounded-sm border border-paper-line bg-paper p-1">
+          <button
+            type="button"
+            onClick={() => handleModeChange("content")}
+            disabled={contentTabs.length === 0}
+            className={[
+              "rounded-sm px-4 py-1.5 text-xs font-medium transition-colors",
+              mode === "content"
+                ? "bg-ink text-paper shadow-xs"
+                : "text-muted hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+            ].join(" ")}
+          >
+            Content {contentTabs.length > 0 ? `(${contentTabs.length})` : ""}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleModeChange("appearance")}
+            disabled={appearanceTabs.length === 0}
+            title={
+              appearanceTabs.length === 0
+                ? "No appearance differences for this comparison"
+                : undefined
+            }
+            className={[
+              "rounded-sm px-4 py-1.5 text-xs font-medium transition-colors",
+              mode === "appearance"
+                ? "bg-ink text-paper shadow-xs"
+                : "text-muted hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+            ].join(" ")}
+          >
+            Appearance {appearanceTabs.length > 0 ? `(${appearanceTabs.length})` : ""}
+          </button>
         </div>
-      )}
+        <span className="hidden text-xs text-muted sm:inline">
+          {mode === "content"
+            ? "Substance & data: Text, Meaning, Tables"
+            : "Style & visual: Formatting, Pages"}
+        </span>
+      </div>
+
+      {visibleTabs.length > 0 ? (
+        <>
+          <div className="flex flex-wrap gap-1 border-b border-paper-line">
+            {visibleTabs.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={[
+                  "rounded-t-sm border-b-2 px-4 py-2.5 text-sm font-medium transition-colors",
+                  activeTab === tab ? "border-ink text-ink" : "border-transparent text-muted hover:text-ink",
+                ].join(" ")}
+              >
+                {TAB_LABEL[tab]}
+              </button>
+            ))}
+          </div>
 
       <div>
         {activeTab === "text" && result.segments && (
@@ -116,6 +181,19 @@ export function ResultsPanel({ result }: { result: JobStatusResponse }) {
         {activeTab === "visual" && result.visual_diff && <VisualDiffView pages={result.visual_diff} />}
         {activeTab === "meaning" && result.semantic_diff && <SemanticDiffView diff={result.semantic_diff} />}
       </div>
+    </>
+  ) : (
+    <div className="rounded-sm border border-paper-line bg-white p-8 text-center">
+      <p className="font-serif text-base text-ink">
+        No {mode === "content" ? "content" : "appearance"} differences
+      </p>
+      <p className="mt-1 text-sm text-muted">
+        {mode === "appearance"
+          ? "No formatting or visual changes were found. For plain-text documents, appearance diffing is not applicable."
+          : "No content differences were found between these documents."}
+      </p>
+    </div>
+  )}
     </section>
   );
 }

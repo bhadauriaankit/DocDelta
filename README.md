@@ -4,14 +4,13 @@ A document comparison platform, built in phases as a learning project for a
 modern full-stack toolchain (Next.js, FastAPI, Celery, Postgres, MinIO,
 Docker, Kubernetes). See `docs/roadmap.md` for the full phase-by-phase plan.
 
-**Current status: font/style comparison + a UI overhaul** (on top of
-Phase 7) — text/PDF/DOCX/XLSX/CSV/PPTX/image comparison, with OCR for
-scanned PDFs and standalone images, page-level visual comparison for
-PDFs, row-and-cell-level table diffing for spreadsheets, paragraph-level
-semantic comparison, and now font/size/bold/italic/color comparison for
-DOCX and PDF — all running as an async background job (Postgres +
-Celery/Redis + MinIO), Dockerized, with a tabbed results view instead of
-one long undifferentiated scroll.
+**Current status: Compare Modes + Paste-to-Compare** (on top of
+Phase 7 & style comparison) — text/PDF/DOCX/XLSX/CSV/PPTX/image
+comparison with OCR, page-level visual comparison for PDFs, row/cell
+table diffing, paragraph semantic comparison, and font/style diffing.
+Now features two top-level presentation modes (Content vs Appearance)
+and direct clipboard paste-to-compare without saving files first — all
+running on the async Postgres + Celery/Redis + MinIO pipeline.
 
 ---
 
@@ -21,7 +20,7 @@ one long undifferentiated scroll.
 doccompare-ai/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py        # API: /health, POST /jobs, GET /jobs/{id}
+│   │   ├── main.py        # API: /health, POST /jobs, POST /jobs/text, GET /jobs/{id}
 │   │   ├── diff_engine.py # deterministic word-level diff (difflib)
 │   │   ├── schemas.py     # Pydantic request/response models
 │   │   ├── config.py      # settings, read from env vars
@@ -38,11 +37,11 @@ doccompare-ai/
 │   │   └── parsers/       # format detection + text/pdf/docx/xlsx/csv/pptx/image extraction
 │   ├── requirements.txt          # default deps — no heavy ML dependencies
 │   ├── requirements-semantic.txt # OPTIONAL: real sentence-embeddings upgrade
-│   └── tests/             # pytest suite (116 tests, no external services needed)
+│   └── tests/             # pytest suite (126 tests, no external services needed)
 ├── frontend/         Next.js 15 + TypeScript + Tailwind v4
 │   └── src/
-│       ├── app/page.tsx       # main comparison page (job create + poll)
-│       ├── components/        # FileSlot, ResultsPanel (tabbed summary+detail), SideBySideView, DiffView, FormattingDiffView, TableDiffView, VisualDiffView, SemanticDiffView
+│       ├── app/page.tsx       # main comparison page (job create + poll, file/paste toggle)
+│       ├── components/        # FileSlot, PasteTextSlot, ResultsPanel (modes + tabbed detail), SideBySideView, DiffView, FormattingDiffView, TableDiffView, VisualDiffView, SemanticDiffView
 │       └── lib/
 │           ├── api.ts         # typed API client
 │           └── summary.ts     # plain-language summary + tab availability logic
@@ -576,6 +575,82 @@ looking healthy until the first real job's last step. Tested by actually
 building a deliberately "old" table (missing a column) with a separate
 throwaway SQLite engine and confirming the check catches it — not just
 testing that a correctly-created schema passes.
+
+## Enhancement (September 2026): Comparison Modes + Paste-to-Compare
+
+Two user-experience improvements built on top of the Phase 7 foundation:
+separating results by user intent ("did the substance change" vs "did it
+look different") and removing file-upload friction for quick clipboard
+comparisons.
+
+### Feature 1: Comparison Mode Toggle — "Content" vs "Appearance"
+
+Previously, all available tabs (Text, Formatting, Tables, Pages, Meaning)
+were displayed in a single flat bar. A contract lawyer reviewing language
+changes had to look past font styles and visual layouts; a designer
+checking brand consistency had to navigate through semantic diffs.
+
+- **`Content` mode** focuses on substance: **Text**, **Meaning**, and
+  **Tables**.
+- **`Appearance` mode** focuses on styling: **Formatting** (fonts/styles)
+  and **Pages** (visual layout diffs).
+- **Default state**: Every new comparison defaults to `Content` mode.
+- **Dynamic tab filtering**: `buildSummary()` in `lib/summary.ts` now
+  buckets tabs into `contentTabs` and `appearanceTabs`, showing only tabs
+  that both match the active mode *and* have actual differences.
+- **Graceful empty states**: When a comparison yields no differences for a
+  mode (for example, comparing plain `.txt` files has no formatting or
+  visual pages), the toggle option is disabled with a clear title tooltip,
+  and if selected, renders an informative empty state explaining why,
+  preventing dead-end blank panels.
+- **Interactive summary jump**: The top summary card remains
+  mode-agnostic ("These documents are 87% similar. We found..."), and
+  clicking any individual count jumps straight to that tab while
+  automatically switching to the appropriate mode.
+
+### Feature 2: Paste-to-Compare (direct text input)
+
+Uploading files added unnecessary friction when users simply wanted to
+compare two snippets or paragraphs already copied to their clipboard.
+
+- **Home page toggle**: Segmented control (`Upload files | Paste text`)
+  lets users seamlessly switch between drag-and-drop file uploads and
+  direct text entry.
+- **`PasteTextSlot.tsx`**: Matches the exact visual language of
+  `FileSlot.tsx` (bordered paper card, tracking header labels, matching
+  proportions) with live word counts and character counts.
+- **Input boundary (100,000 characters per side)**: Capped to comfortably
+  accommodate ~15,000–20,000 words (the size of a lengthy legal agreement
+  or multi-chapter draft) while bounding payload memory. Exceeding the
+  limit triggers both client-side visual warnings and a server-side
+  HTTP 413 Payload Too Large error mirroring `MAX_FILE_SIZE_BYTES`.
+- **Backend adapter (`POST /jobs/text`)**: Accepts JSON body
+  `{ "original_text": str, "modified_text": str }`. Reuses an extracted
+  `_create_job_and_enqueue()` helper that stores UTF-8 bytes under
+  synthetic filenames (`pasted-original.txt` / `pasted-modified.txt`) in
+  `ObjectStorage`. The downstream Celery task, format detection, diffing,
+  and Postgres persistence execute without a single line changed.
+- **Typed client**: `createComparisonJobFromText()` in `lib/api.ts` funnels
+  into the existing `pollJobUntilDone()` polling loop.
+- **Side-by-side / Inline toggle**: Automatically works for pasted text
+  since the adapter produces standard `segments` array in the job result.
+
+### Testing & Verification
+
+- **Pytest suite expanded to 126 tests** (no external services needed):
+  - `test_create_text_job_happy_path`: verifies 202 Accepted and job queued.
+  - `test_create_text_job_oversized_input_rejection`: confirms HTTP 413
+    rejection for >100k characters on either original or modified side.
+  - `test_create_text_job_empty_string_handling`: ensures both empty and
+    single-sided empty inputs complete cleanly with correct similarity and
+    segments without 500 errors.
+  - `test_create_text_job_end_to_end_diff_and_none_fields`: confirms text
+    diff segments are produced while `formatting_diff`, `visual_diff`, and
+    `table_diff` are safely `None`.
+  - `test_create_text_job_validation_error`: confirms HTTP 422 for missing
+    payload fields.
+- **Frontend build**: TypeScript compilation and Next.js static build
+  passed with 0 errors.
 
 ## Next up: Phase 8
 

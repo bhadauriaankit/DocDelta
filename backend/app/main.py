@@ -30,6 +30,7 @@ from app.schemas import (
     JobCreateResponse,
     JobStatusResponse,
     PageVisualDiffResponse,
+    PasteCompareRequest,
     SemanticDiffResponse,
     SpreadsheetDiffResponse,
 )
@@ -41,6 +42,10 @@ APP_VERSION = "0.7.0-phase7"
 # PDFs/DOCX are naturally bigger than plain text; 20MB comfortably covers
 # most everyday documents while bounding worst-case memory use.
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
+
+# Cap pasted text to 100,000 characters per side — generous enough for
+# long legal agreements or multi-page drafts while bounding memory.
+MAX_PASTE_CHARS = 100_000
 
 
 @asynccontextmanager
@@ -100,32 +105,23 @@ async def _read_upload(file: UploadFile) -> bytes:
     return raw
 
 
-@app.post("/jobs", response_model=JobCreateResponse, status_code=202)
-async def create_job(
-    original: UploadFile = File(..., description="The original / baseline document"),
-    modified: UploadFile = File(..., description="The modified / new document"),
-    db: Session = Depends(get_db),
+def _create_job_and_enqueue(
+    db: Session,
+    *,
+    original_filename: str,
+    original_bytes: bytes,
+    modified_filename: str,
+    modified_bytes: bytes,
 ) -> JobCreateResponse:
-    """Accepts two files, stores them, and enqueues a background
-    comparison job. Deliberately does NOT parse/diff the documents here —
-    that's the whole point of moving this to a worker: the request
-    returns fast regardless of how big or slow-to-parse the files are.
-
-    Format validation (magic bytes, not just extension) still happens,
-    but inside the worker now, not here — see app/tasks.py.
-    """
-    original_bytes = await _read_upload(original)
-    modified_bytes = await _read_upload(modified)
-
     storage = get_storage()
 
     original_doc = Document(
-        filename=original.filename or "original",
+        filename=original_filename,
         storage_key=f"uploads/{uuid4()}",
         size_bytes=len(original_bytes),
     )
     modified_doc = Document(
-        filename=modified.filename or "modified",
+        filename=modified_filename,
         storage_key=f"uploads/{uuid4()}",
         size_bytes=len(modified_bytes),
     )
@@ -152,6 +148,60 @@ async def create_job(
     process_comparison_job.delay(job_id)
 
     return JobCreateResponse(id=job_id, status=initial_status)
+
+
+@app.post("/jobs", response_model=JobCreateResponse, status_code=202)
+async def create_job(
+    original: UploadFile = File(..., description="The original / baseline document"),
+    modified: UploadFile = File(..., description="The modified / new document"),
+    db: Session = Depends(get_db),
+) -> JobCreateResponse:
+    """Accepts two files, stores them, and enqueues a background
+    comparison job. Deliberately does NOT parse/diff the documents here —
+    that's the whole point of moving this to a worker: the request
+    returns fast regardless of how big or slow-to-parse the files are.
+
+    Format validation (magic bytes, not just extension) still happens,
+    but inside the worker now, not here — see app/tasks.py.
+    """
+    original_bytes = await _read_upload(original)
+    modified_bytes = await _read_upload(modified)
+
+    return _create_job_and_enqueue(
+        db,
+        original_filename=original.filename or "original",
+        original_bytes=original_bytes,
+        modified_filename=modified.filename or "modified",
+        modified_bytes=modified_bytes,
+    )
+
+
+@app.post("/jobs/text", response_model=JobCreateResponse, status_code=202)
+async def create_text_job(
+    payload: PasteCompareRequest,
+    db: Session = Depends(get_db),
+) -> JobCreateResponse:
+    """Accepts two plain text snippets via JSON, stores them as synthetic
+    .txt files, and enqueues the comparison pipeline. Reuses the exact same
+    worker pipeline as file uploads."""
+    if len(payload.original_text) > MAX_PASTE_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Original text exceeds the {MAX_PASTE_CHARS:,} character limit.",
+        )
+    if len(payload.modified_text) > MAX_PASTE_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Modified text exceeds the {MAX_PASTE_CHARS:,} character limit.",
+        )
+
+    return _create_job_and_enqueue(
+        db,
+        original_filename="pasted-original.txt",
+        original_bytes=payload.original_text.encode("utf-8"),
+        modified_filename="pasted-modified.txt",
+        modified_bytes=payload.modified_text.encode("utf-8"),
+    )
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)

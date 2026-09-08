@@ -415,3 +415,89 @@ def test_job_skips_formatting_diff_for_unsupported_format_pair():
     final = _wait_for_job(create_resp.json()["id"])
     assert final["status"] == "done"
     assert final["formatting_diff"] is None
+
+
+def test_create_text_job_happy_path():
+    payload = {
+        "original_text": "Clause 1: Delivery within 30 days.",
+        "modified_text": "Clause 1: Delivery within 14 days.",
+    }
+    resp = client.post("/jobs/text", json=payload)
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["id"]
+
+
+def test_create_text_job_oversized_input_rejection():
+    # 100,001 characters on original side
+    oversized_original = {
+        "original_text": "x" * 100_001,
+        "modified_text": "normal text",
+    }
+    resp = client.post("/jobs/text", json=oversized_original)
+    assert resp.status_code == 413
+    assert "Original text exceeds the 100,000 character limit" in resp.json()["detail"]
+
+    # 100,001 characters on modified side
+    oversized_modified = {
+        "original_text": "normal text",
+        "modified_text": "y" * 100_001,
+    }
+    resp = client.post("/jobs/text", json=oversized_modified)
+    assert resp.status_code == 413
+    assert "Modified text exceeds the 100,000 character limit" in resp.json()["detail"]
+
+
+def test_create_text_job_empty_string_handling():
+    # Both empty strings
+    resp = client.post("/jobs/text", json={"original_text": "", "modified_text": ""})
+    assert resp.status_code == 202
+    final = _wait_for_job(resp.json()["id"])
+    assert final["status"] == "done"
+    assert final["similarity"] == 1.0
+    assert final["segments"] == []
+    assert final["formatting_diff"] is None
+    assert final["visual_diff"] is None
+
+    # One empty string (original empty, modified has content)
+    resp = client.post(
+        "/jobs/text",
+        json={"original_text": "", "modified_text": "Freshly added content."},
+    )
+    assert resp.status_code == 202
+    final = _wait_for_job(resp.json()["id"])
+    assert final["status"] == "done"
+    assert final["similarity"] == 0.0
+    assert any(s["type"] == "added" for s in final["segments"])
+
+
+def test_create_text_job_end_to_end_diff_and_none_fields():
+    payload = {
+        "original_text": "The quick brown fox jumps over the lazy dog.",
+        "modified_text": "The fast brown fox leaps over the lazy dog.",
+    }
+    resp = client.post("/jobs/text", json=payload)
+    assert resp.status_code == 202
+
+    final = _wait_for_job(resp.json()["id"])
+    assert final["status"] == "done"
+    assert 0.0 < final["similarity"] < 1.0
+    assert len(final["segments"]) > 0
+
+    # Verify replaced segments and equal segments
+    types = [s["type"] for s in final["segments"]]
+    assert "equal" in types
+    assert "replaced" in types
+
+    # Paste-to-compare plain text must not have formatting, visual, or table diffs
+    assert final["formatting_diff"] is None
+    assert final["visual_diff"] is None
+    assert final["table_diff"] is None
+
+
+def test_create_text_job_validation_error():
+    # Missing modified_text
+    resp = client.post("/jobs/text", json={"original_text": "Hello"})
+    assert resp.status_code == 422
+

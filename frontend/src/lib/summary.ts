@@ -8,14 +8,28 @@ export type SummaryLine = {
 
 export type TabId = "text" | "formatting" | "tables" | "visual" | "meaning";
 
+export type CompareMode = "content" | "appearance";
+
+export const CONTENT_TABS: TabId[] = ["text", "meaning", "tables"];
+export const APPEARANCE_TABS: TabId[] = ["formatting", "visual"];
+
+export const TAB_MODE_MAP: Record<TabId, CompareMode> = {
+  text: "content",
+  meaning: "content",
+  tables: "content",
+  formatting: "appearance",
+  visual: "appearance",
+};
+
 /** Turns the raw comparison result into a small set of plain-language
  * counts — "5 text changes", "2 formatting changes" — and figures out
- * which detail tabs actually have something to show. Nothing here is
- * AI-generated; it's just counting numbers that are already in the
- * response, in one place, so the UI doesn't repeat this logic per tab. */
+ * which detail tabs actually have something to show. Buckets tabs into
+ * "content" (substance/data) and "appearance" (styling/pages) modes. */
 export function buildSummary(result: JobStatusResponse): {
   lines: SummaryLine[];
   availableTabs: TabId[];
+  contentTabs: TabId[];
+  appearanceTabs: TabId[];
   totalChanges: number;
 } {
   const lines: SummaryLine[] = [];
@@ -54,8 +68,11 @@ export function buildSummary(result: JobStatusResponse): {
     if (count > 0) lines.push({ label: "paragraph with a meaning change", count, tabId: "meaning" });
   }
 
+  const contentTabs = CONTENT_TABS.filter((t) => availableTabs.includes(t));
+  const appearanceTabs = APPEARANCE_TABS.filter((t) => availableTabs.includes(t));
+
   const totalChanges = lines.reduce((sum, l) => sum + l.count, 0);
-  return { lines, availableTabs, totalChanges };
+  return { lines, availableTabs, contentTabs, appearanceTabs, totalChanges };
 }
 
 function pluralize(label: string, count: number): string {
